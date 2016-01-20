@@ -184,19 +184,33 @@ class Merger(object):
                 # Open the file to write and write to it
                 with open(outsamplesheet, 'wb') as writesheet:
                     writesheet.write(''.join(samplesheet))
+        # Optionally copy
+        if self.copy:
+            import shutil
+            make_path('{}/BestAssemblies'.format(self.assemblypath))
         # Link the files to the assembly path
         for sample in self.data:
             try:
-                # Link the files
-                os.symlink(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
-                                                                        os.path.basename(sample.general.outputforward)))
-                os.symlink(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
-                                                                        os.path.basename(sample.general.outputreverse)))
+                if self.copy:
+
+                    shutil.copyfile(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
+                                    os.path.basename(sample.general.outputforward)))
+                    shutil.copyfile(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
+                                    os.path.basename(sample.general.outputreverse)))
+
+                else:
+                    os.symlink(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
+                               os.path.basename(sample.general.outputforward)))
+                    os.symlink(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
+                               os.path.basename(sample.general.outputreverse)))
             # Except os errors
             except OSError as exception:
                 # If the os error is anything but directory exists, then raise
                 if exception.errno != errno.EEXIST:
                     raise
+        # Remove the BestAssemblies directory if necessary
+        if self.copy:
+            os.removedirs('{}/BestAssemblies'.format(self.assemblypath))
 
     def execute(self, command, outfile=""):
         """
@@ -315,7 +329,9 @@ class Merger(object):
         self.idmerge()
         # Exit
         self.printtime(u'Files have been successfully merged.')
-        if args['linkFiles']:
+        if args['linkFiles'] or args['copy']:
+            if args['copy']:
+                self.copy = True
             # Create the assembly folder and path from the supplied arguments
             self.assemblyfolder = args['o'] if args['o'] else self.path.split('/')[-2]
             self.assemblypath = os.path.join(args['a'], "") + self.assemblyfolder
@@ -353,7 +369,7 @@ if __name__ == '__main__':
     parser.add_argument('-f', metavar='idFile', help='The name and path of the file containing seqIDs to '
                         'merge and reassemble. If this file is in the path, then including the path is not necessary'
                         ' for this argument. Alternatively, as long as the file has a .txt, .csv, or. tsv file '
-                        'extension, you can omit this argument altogether. Note: you don\'t supply the argument, and'
+                        'extension, you can omit this argument altogether. Note: if you don\'t supply the argument, and'
                         'there are multiple files with any of these extensions, the program will fail')
     parser.add_argument('-d', metavar='delimiter', default='space', help='The delimiter used to separate seqIDs. '
                         'Popular options are "space", "tab", and "comma". Default is space. Note: you can use custom'
@@ -371,6 +387,8 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--samplesheet', action='store_true', help='Depending on the version of the assembly '
                         'pipeline, a sample sheet is required. Including this option will populate a basic sample sheet'
                         'with enough information in order to allow the pipeline to proceed')
+    parser.add_argument('-c', metavar='copy', help='Copies rather than symbolically linking the files to the '
+                        'destination folder.')
 
     # Get the arguments into a list
     arguments = vars(parser.parse_args())
