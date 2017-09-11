@@ -1,72 +1,23 @@
 #!/usr/bin/env python
-import os
 import sys
-import errno
 from glob import glob
+from accessoryFunctions.accessoryFunctions import *
 __author__ = 'adamkoziol'
 
-# Initialise the count
-count = 0
 
-
-class GenObject(object):
-    """Object to store static variables"""
-    def __init__(self, x=None):
-        start = (lambda y: y if y else {})(x)
-        super(GenObject, self).__setattr__('datastore', start)
-
-    def __getattr__(self, key):
-        return self.datastore[key]
-
-    def __setattr__(self, key, value):
-        if value:
-            self.datastore[key] = value
-        else:
-            self.datastore[key] = "NA"
-
-
-class MetadataObject(object):
-    """Object to store static variables"""
-    def __init__(self):
-        """Create datastore attr with empty dict"""
-        super(MetadataObject, self).__setattr__('datastore', {})
-
-    def __getattr__(self, key):
-        """:key is retrieved from datastore if exists, for nested attr recursively :self.__setattr__"""
-        if key not in self.datastore:
-            self.__setattr__(key)
-        return self.datastore[key]
-
-    def __setattr__(self, key, value=GenObject(), **args):
-        """Add :value to :key in datastore or create GenObject for nested attr"""
-        if args:
-            self.datastore[key].value = args
-        else:
-            self.datastore[key] = value
-
-    def dump(self):
-        """Print only the nested dictionary values; removes __methods__ and __members__ attributes"""
-        metadata = {}
-        for attr in self.datastore:
-            metadata[attr] = {}
-            if not attr.startswith('__'):
-                if isinstance(self.datastore[attr], str):
-                    metadata[attr] = self.datastore[attr]
-                else:
-                    metadata[attr] = self.datastore[attr].datastore
-        return metadata
-
-
-def make_path(inpath):
+def relativesymlink(src_file, dest_file):
     """
-    from: http://stackoverflow.com/questions/273192/check-if-a-directory-exists-and-create-it-if-necessary \
-    does what is indicated by the URL
-    :param inpath: string of the supplied path
+    https://stackoverflow.com/questions/9793631/creating-a-relative-symlink-in-python-without-using-os-chdir
+    :param src_file: the file to be linked
+    :param dest_file: the path and filename to which the file is to be linked
     """
-    import os
+    # Perform relative symlinking
     try:
-        # os.makedirs makes parental folders as required
-        os.makedirs(inpath)
+        os.symlink(
+            # Find the relative path for the source file and the destination file
+            os.path.relpath(src_file),
+            os.path.relpath(dest_file)
+        )
     # Except os errors
     except OSError as exception:
         # If the os error is anything but directory exists, then raise
@@ -77,20 +28,56 @@ def make_path(inpath):
 class Merger(object):
 
     def idseek(self):
+        import pandas
+        nesteddictionary = dict()
         # Create a list of all the lines in the file: open(self.idfile).readlines()
         # Create a lambda function
         # Map the list to the lambda function and split the list based on the delimiter: x.split(self.delimiter)
         # List comprehension of individual seq IDs without whitespace: [x.rstrip() for x in ...]
-        self.seqids = map(lambda x: [x.rstrip() for x in x.split(self.delimiter)], open(self.idfile).readlines())
+        # self.seqids = map(lambda x: [x.rstrip() for x in x.split(self.delimiter)], open(self.idfile).readlines())
+        dictionary = pandas.read_excel(self.idfile).to_dict()
+        # Iterate through the dictionary - each header from the excel file
+        for header in dictionary:
+            # Sample is the primary key, and value is the value of the cell for that primary key + header combination
+            for sample, value in dictionary[header].items():
+                # Update the dictionary with the new data
+                try:
+                    nesteddictionary[sample].update({header: value})
+                # Create the nested dictionary if it hasn't been created yet
+                except KeyError:
+                    nesteddictionary[sample] = dict()
+                    nesteddictionary[sample].update({header: value})
+        # Create objects for each of the samples, rather than using a nested dictionary. It may have been possible to
+        # skip the creation of the nested dictionary, and create the objects from the original dictionary, but there
+        # seemed to be too many possible places for something to go wrong
+        for line in nesteddictionary:
+            # Create an object for each sample
+            metadata = MetadataObject()
+            # Set the name of the metadata to be the primary key for the sample from the excel file
+            metadata.name = line
+            # Find the headers and values for every sample
+            for header, value in nesteddictionary[line].items():
+                # Try/except for value.encode() - some of the value are type int, so they cannot be encoded
+                try:
+                    # Create each attribute - use the header (in lowercase, and spaces removed) as the attribute name,
+                    # and the value as the attribute value
+                    setattr(metadata, header.replace(' ', '').lower(), str(value))
+                except AttributeError:
+                    setattr(metadata, header.replace(' ', '').lower(), value)
+            # Append the object to the list of objects
+            self.metadata.append(metadata)
+        for sample in self.metadata:
+            # Sort the seqIDs
+            sample.merge = sorted(sample.merge.split(self.delimiter))
 
     def idfind(self):
         """Find the fastq files associated with the seq IDs pulled from the seq ID file. Populate a MetadataObject
         with the name of the merged files as well as the fastq file names and paths"""
-        for merge in self.seqids:
-            # Initialise the lists
-            seqidfile = []
-            outputname = []
-            for ids in merge:
+        for sample in self.metadata:
+            # Create the general category for the MetadataObject
+            sample.general = GenObject()
+            sample.general.fastqfiles = list()
+            for ids in sample.merge:
                 # Ensure that the id exists. Dues to the way the ids were pulled from the file, newline characters
                 # will be entered into the list. Skip them
                 if ids:
@@ -100,43 +87,34 @@ class Merger(object):
                     assert idfile, 'Cannot find files for seq ID: {}. Please check that the seqIDs ' \
                                    'provided in the seq ID file match the files present in the path'.format(ids)
                     # Append the fastq file and path and the seq ID to the appropriate list
-                    seqidfile.append(idfile)
-                    outputname.append(ids)
-            # Create the MetadataObject to store variables associated with each file set to merge
-            data = MetadataObject()
-            # Set the name of the file set
-            data.name = '-'.join(outputname)
-            # Create the general category for the MetadataObject
-            data.general = GenObject()
-            # Populate the fastq files in the file set
-            data.general.fastqfiles = seqidfile
-            # Append the MetadataObjects to a list
-            self.data.append(data)
+                    sample.general.fastqfiles.append(idfile)
 
     def idmerge(self):
         """Merge the files together"""
         from threading import Thread
-        # As :self.data.general.fastqfiles is a list of lists, find the length of each child list with len(), add
-        # these lengths together with sum(), and use range() to set the number of times to iterate
-        for i in range([sum(len(sample.general.fastqfiles) for sample in self.data)][0]):
+        #
+        for i in range(self.cpus):
             # Send the threads to the merge method. :args is empty as I'm using
             threads = Thread(target=self.merge, args=())
             # Set the daemon to true - something to do with thread management
             threads.setDaemon(True)
             # Start the threading
             threads.start()
-        for sample in self.data:
+        for sample in self.metadata:
             # Initialise strings to hold the forward and reverse fastq files
-            forwardfiles = []
-            reversefiles = []
+            forwardfiles = list()
+            reversefiles = list()
             # Create the output directory
             sample.general.outputdir = '{}{}'.format(self.path, sample.name)
             make_path(sample.general.outputdir)
             # Iterate through the samples
             for files in sample.general.fastqfiles:
                 # Find the forward and reverse files (forward files must have have either _R1_ or _1_
-                forwardfiles.append((map(lambda x: x if '_R1_' in x or '_1_' in x else '', sorted(files)))[0])
-                reversefiles.append((map(lambda x: x if '_R2_' in x or '_2_' in x else '', sorted(files)))[1])
+                for fastq in files:
+                    if '_R1_' in fastq or '_1_' in fastq or '_1.' in fastq:
+                        forwardfiles.append(fastq)
+                    elif '_R2_' in fastq or '_2_' in fastq or '_2.' in fastq:
+                        reversefiles.append(fastq)
             # Add the files to the processing queue
             sample.general.outputforward = '{}/{}_S1_L001_R1_001.fastq.gz'.format(sample.general.outputdir, sample.name)
             sample.general.outputreverse = '{}/{}_S1_L001_R2_001.fastq.gz'.format(sample.general.outputdir, sample.name)
@@ -144,6 +122,7 @@ class Merger(object):
             sample.commands = GenObject()
             sample.commands.forwardmerge = 'cat {} > {}'.format(' '.join(forwardfiles), sample.general.outputforward)
             sample.commands.reversemerge = 'cat {} > {}'.format(' '.join(reversefiles), sample.general.outputreverse)
+            # Add the commands to the queue
             self.mergequeue.put((sample.commands.forwardmerge, sample.general.outputforward))
             self.mergequeue.put((sample.commands.reversemerge, sample.general.outputreverse))
         # Join the threads
@@ -158,7 +137,7 @@ class Merger(object):
                 try:
                     self.execute(mergecommand)
                 except KeyboardInterrupt:
-                    self.printtime(u'Keyboard interrupt! The system call will not stop until it is finished.')
+                    printtime(u'Keyboard interrupt! The system call will not stop until it is finished.', self.start)
                     self.mergequeue.empty()
                     try:
                         os.remove(outputfile)
@@ -182,27 +161,32 @@ class Merger(object):
             # Don't overwrite a sample sheet already present in the directory
             if not os.path.isfile(outsamplesheet):
                 # Open the file to write and write to it
-                with open(outsamplesheet, 'wb') as writesheet:
+                with open(outsamplesheet, 'w') as writesheet:
                     writesheet.write(''.join(samplesheet))
         # Optionally copy
         if self.copy:
             import shutil
             make_path('{}/BestAssemblies'.format(self.assemblypath))
         # Link the files to the assembly path
-        for sample in self.data:
+        for sample in self.metadata:
             try:
                 if self.copy:
-
                     shutil.copyfile(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
                                     os.path.basename(sample.general.outputforward)))
                     shutil.copyfile(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
                                     os.path.basename(sample.general.outputreverse)))
 
                 else:
-                    os.symlink(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
-                               os.path.basename(sample.general.outputforward)))
-                    os.symlink(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
-                               os.path.basename(sample.general.outputreverse)))
+                    if self.relativepaths:
+                        relativesymlink(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
+                                        os.path.basename(sample.general.outputforward)))
+                        relativesymlink(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
+                                        os.path.basename(sample.general.outputreverse)))
+                    else:
+                        os.symlink(sample.general.outputforward, '{}/{}'.format(self.assemblypath,
+                                   os.path.basename(sample.general.outputforward)))
+                        os.symlink(sample.general.outputreverse, '{}/{}'.format(self.assemblypath,
+                                   os.path.basename(sample.general.outputreverse)))
             # Except os errors
             except OSError as exception:
                 # If the os error is anything but directory exists, then raise
@@ -270,7 +254,8 @@ class Merger(object):
         :param start: the start time
         Initialises the variables required for this class
         """
-        from Queue import Queue
+        from queue import Queue
+        import multiprocessing
         # Define variables from the arguments - there may be a more streamlined way to do this
         self.args = args
         self.path = os.path.join(args['path'], "")
@@ -305,7 +290,7 @@ class Merger(object):
             assert filecount >= 1, u'Could not find a seq ID file with a .txt, .tsv, or .csv extension in the path'
         # Assertion to ensure that the seq ID file exists
         assert os.path.isfile(self.idfile), u'seqID file cannot be found {0!r:s}'.format(self.idfile)
-        self.printtime(u'Using {} as the file containing seq IDs to be merged'.format(self.idfile))
+        printtime(u'Using {} as the file containing seq IDs to be merged'.format(self.idfile), self.start)
 
         # Set the delimiter
         self.delimiter = args['d'].lower()
@@ -315,12 +300,16 @@ class Merger(object):
             self.delimiter = '\t'
         elif self.delimiter == 'comma' or self.delimiter == ',':
             self.delimiter = ','
+        # Determine if sorting the columns is desired
+        self.sort = args['Sort']
         # Initialise class variables
         self.seqids = ""
-        self.seqfiles = []
-        self.data = []
-        self.mergequeue = Queue()
+        self.seqfiles = list()
+        self.data = list()
+        self.cpus = multiprocessing.cpu_count()
+        self.mergequeue = Queue(maxsize=self.cpus)
         self.count = 0
+        self.metadata = list()
         # Find which IDs need to be merged together from the text file
         self.idseek()
         # Find the files corresponding to the IDs
@@ -328,10 +317,12 @@ class Merger(object):
         # Merge the files together
         self.idmerge()
         # Exit
-        self.printtime(u'Files have been successfully merged.')
+        printtime(u'Files have been successfully merged.', self.start)
+        # Set the optional arguments
+        self.copy = args['copy'] if args['copy'] else False
+        self.relativepaths = args['relativePaths'] if args['relativePaths'] else False
+        # Optionally run the file linking method
         if args['linkFiles'] or args['copy']:
-            if args['copy']:
-                self.copy = True
             # Create the assembly folder and path from the supplied arguments
             self.assemblyfolder = args['o'] if args['o'] else self.path.split('/')[-2]
             self.assemblypath = os.path.join(args['a'], "") + self.assemblyfolder
@@ -341,15 +332,8 @@ class Merger(object):
             self.samplesheet = args['samplesheet']
             # Run the linking
             self.filelink()
-            self.printtime(u'Files have been successfully linked to the assembly folder.')
+            printtime(u'Files have been successfully linked to the assembly folder. Analysis complete.', self.start)
         sys.exit()
-
-    def printtime(self, string):
-        """Prints a string in bold with the elapsed time
-        :param string: a string to be printed in bold
-        """
-        import time
-        print(u'\n\033[1m' + u'[Elapsed Time: {:.2f} seconds] {}'.format(time.time() - self.start, string) + u'\033[0m')
 
 # If the script is called from the command line, then call the argument parser
 if __name__ == '__main__':
@@ -366,33 +350,60 @@ if __name__ == '__main__':
     parser = ArgumentParser(description='Merges seqIDs')
     parser.add_argument('-v', '--version', action='version', version='%(prog)s commit {}'.format(commit))
     parser.add_argument('path',  help='Specify path')
-    parser.add_argument('-f', metavar='idFile', help='The name and path of the file containing seqIDs to '
-                        'merge and reassemble. If this file is in the path, then including the path is not necessary'
-                        ' for this argument. Alternatively, as long as the file has a .txt, .csv, or. tsv file '
-                        'extension, you can omit this argument altogether. Note: if you don\'t supply the argument, and'
-                        'there are multiple files with any of these extensions, the program will fail')
-    parser.add_argument('-d', metavar='delimiter', default='space', help='The delimiter used to separate seqIDs. '
-                        'Popular options are "space", "tab", and "comma". Default is space. Note: you can use custom'
-                        'delimiters. Just be aware that a delimiter, such as "-" will break the program if there are'
-                        'hyphens in your sample names')
-    parser.add_argument('-l', '--linkFiles', action='store_true', help='Optionally link the files to the \'WGS_Spades\''
-                        ' directory. Note that this is specific to the local setup here and is not recommended unless'
-                        ' your set-up is similar')
-    parser.add_argument('-a', metavar='assemblyLocation', default='/nas/akoziol/WGS_Spades/', help='Path to a folder'
-                        ' where files are automatically assembled using a cluster. Only relevant if linking the files')
-    parser.add_argument('-o', metavar='outputdirectory', help='A directory name to use when linking the merged .fastq'
-                        'files to the WGS_Spades folder e.g. 2016-01-19_ListeriaMerged. If this is not provided, then'
-                        'the program will use the name of lowest folder in the path e.g. \'files\' will be used if the'
-                        'path is \'/path/to/files\'')
-    parser.add_argument('-s', '--samplesheet', action='store_true', help='Depending on the version of the assembly '
-                        'pipeline, a sample sheet is required. Including this option will populate a basic sample sheet'
-                        'with enough information in order to allow the pipeline to proceed')
-    parser.add_argument('-c', metavar='copy', help='Copies rather than symbolically linking the files to the '
-                        'destination folder.')
+    parser.add_argument('-f',
+                        metavar='idFile',
+                        help='The name and path of the file containing seqIDs to merge and reassemble. If this file is'
+                             ' in the path, then including the path is not necessary  for this argument. Alternatively,'
+                             ' as long as the file has a .txt, .csv, or. tsv file extension, you can omit this argument'
+                             ' altogether. Note: if you don\'t supply the argument, and there are multiple files with '
+                             'any of these extensions, the program will fail')
+
+    parser.add_argument('-d',
+                        metavar='delimiter',
+                        default='space',
+                        help='The delimiter used to separate seqIDs. Popular options are "space", "tab", and "comma". '
+                             'Default is space. Note: you can use custom delimiters. Just be aware that a delimiter, '
+                             'such as "-" will break the program if there are hyphens in your sample names')
+    parser.add_argument('-S',
+                        '--Sort',
+                        default=False,
+                        action='store_true',
+                        help='Optionally sort the seqIDs to merge. seqIDs will be sorted by year, then ID.')
+    parser.add_argument('-l',
+                        '--linkFiles',
+                        action='store_true',
+                        help='Optionally link the files to the \'WGS_Spades\' directory. Note that this is specific to'
+                             ' the local setup here and is not recommended unless your set-up is similar')
+    parser.add_argument('-r',
+                        '--relativePaths',
+                        action='store_true',
+                        help='Optionally use relative paths instead of absolute paths when linking the files. '
+                             'The pipeline does not work with relative paths yet')
+    parser.add_argument('-a',
+                        metavar='assemblyLocation',
+                        default='/nas/akoziol/WGS_Spades/',
+                        help='Path to a folder where files are automatically assembled using a cluster. Only relevant '
+                             'if linking the files')
+    parser.add_argument('-o',
+                        metavar='outputdirectory',
+                        help='A directory name to use when linking the merged .fastq files to the WGS_Spades folder '
+                             'e.g. 2016-01-19_ListeriaMerged. If this is not provided, then the program will use the '
+                             'name of lowest folder in the path e.g. \'files\' will be used if the path '
+                             'is \'/path/to/files\'')
+    parser.add_argument('-s',
+                        '--samplesheet',
+                        action='store_true',
+                        help='Depending on the version of the assembly pipeline, a sample sheet is required. '
+                             'Including this option will populate a basic sample sheet with enough information in order'
+                             ' to allow the pipeline to proceed')
+    parser.add_argument('-c',
+                        '--copy',
+                        action='store_true',
+                        help='Copies rather than symbolically linking the files to the destination folder')
 
     # Get the arguments into a list
     arguments = vars(parser.parse_args())
-
+    # Get the starting time for use in print statements
     starttime = time()
     # Run the pipeline
     output = Merger(arguments, starttime)
